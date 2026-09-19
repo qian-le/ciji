@@ -3,9 +3,6 @@ name: Android Release
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
   workflow_dispatch:
 
 permissions:
@@ -34,9 +31,6 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install deps
         run: npm ci
 
@@ -45,23 +39,23 @@ jobs:
         run: |
           CODE=$(node -p "require('./version.json').versionCode")
           NAME=$(node -p "require('./version.json').versionName")
-          echo "versionCode=$CODE" >> $GITHUB_OUTPUT
-          echo "versionName=$NAME" >> $GITHUB_OUTPUT
-          echo "tag=v$NAME" >> $GITHUB_OUTPUT
+          echo "versionCode=$CODE" >> "$GITHUB_OUTPUT"
+          echo "versionName=$NAME" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NAME" >> "$GITHUB_OUTPUT"
           node scripts/prepare-release.mjs
 
-      - name: Skip if release exists
+      - name: Check release exists
         id: should
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ steps.ver.outputs.tag }}"
           if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Release $TAG already exists, skip publish"
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build web
         if: steps.should.outputs.exists == 'false'
@@ -71,60 +65,98 @@ jobs:
         if: steps.should.outputs.exists == 'false'
         run: npx cap sync android
 
-      - name: Decode keystore
-        if: steps.should.outputs.exists == 'false' && secrets.ANDROID_KEYSTORE_BASE64 != ''
+      - name: Prepare signing keystore
+        if: steps.should.outputs.exists == 'false'
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEYSTORE_ALIAS: ${{ secrets.ANDROID_KEYSTORE_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          set -e
           mkdir -p android/keystore
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/keystore/ciji-release.jks
-          cat > android/keystore/keystore.properties <<EOF
-          storeFile=$(pwd)/android/keystore/ciji-release.jks
-          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          keyAlias=${{ secrets.ANDROID_KEYSTORE_ALIAS }}
-          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
-          EOF
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "ANDROID_KEYSTORE_BASE64 secret is empty; aborting to avoid debug-signed APK."
+            exit 1
+          fi
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n' | base64 -d > android/keystore/ciji-release.jks
+          {
+            echo "storeFile=keystore/ciji-release.jks"
+            echo "storePassword=$ANDROID_KEYSTORE_PASSWORD"
+            echo "keyAlias=$ANDROID_KEYSTORE_ALIAS"
+            echo "keyPassword=$ANDROID_KEY_PASSWORD"
+          } > android/keystore/keystore.properties
+          ls -la android/keystore
+
+      - name: Setup Android SDK
+        if: steps.should.outputs.exists == 'false'
+        run: |
+          set -e
+          ANDROID_SDK_ROOT="$HOME/android-sdk"
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          cd /tmp
+          curl -fsSL -o cmdtools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q cmdtools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+          mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+          yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" "platform-tools" "platforms;android-36" "build-tools;35.0.0" >/dev/null
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
 
       - name: Build release APK
         if: steps.should.outputs.exists == 'false'
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
         run: |
+          set -e
           cd android
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon
-          ls -la app/build/outputs/apk/release/
+          ls -la app/build/outputs/apk/release/ || true
 
-      - name: Copy APK
+      - name: Package APK and update.json
         if: steps.should.outputs.exists == 'false'
+        env:
+          REPO: ${{ github.repository }}
         run: |
+          set -e
           NAME="${{ steps.ver.outputs.versionName }}"
+          CODE="${{ steps.ver.outputs.versionCode }}"
           SRC="android/app/build/outputs/apk/release/app-release.apk"
           if [ ! -f "$SRC" ]; then
             echo "APK not found at $SRC"
-            find android/app/build/outputs -name '*.apk' -print
+            find android/app/build/outputs -name '*.apk' -print || true
             exit 1
           fi
           mkdir -p dist-apk
           cp "$SRC" "dist-apk/ciji-v${NAME}.apk"
-          cp "$SRC" "dist-apk/ciji-v${NAME}-versionCode${{ steps.ver.outputs.versionCode }}.apk"
-          # update.json 指向 Release 资产
-          node -e "
-            const fs=require('fs');
-            const v=require('./version.json');
-            const u=JSON.parse(fs.readFileSync('update.json','utf8'));
-            u.apkUrl='https://github.com/${{ github.repository }}/releases/download/v'+v.versionName+'/ciji-v'+v.versionName+'.apk';
-            u.versionCode=v.versionCode; u.versionName=v.versionName; u.changelog=v.changelog||[];
-            u.force=!!v.force; u.releasedAt=v.releasedAt||new Date().toISOString();
-            fs.writeFileSync('dist-apk/update.json', JSON.stringify(u,null,2)+'\n');
-            fs.writeFileSync('update.json', JSON.stringify(u,null,2)+'\n');
-          "
+          cp "$SRC" "dist-apk/ciji-v${NAME}-versionCode${CODE}.apk"
+          node <<'NODE'
+          const fs = require('fs')
+          const v = JSON.parse(fs.readFileSync('version.json', 'utf8'))
+          const repo = process.env.REPO || 'qian-le/ciji'
+          const u = {
+            versionCode: Number(v.versionCode),
+            versionName: String(v.versionName),
+            minVersionCode: v.minVersionCode || 1,
+            force: Boolean(v.force),
+            releasedAt: v.releasedAt || new Date().toISOString(),
+            changelog: v.changelog || [],
+            github: { owner: repo.split('/')[0], repo: repo.split('/')[1] },
+            apkUrl: `https://github.com/${repo}/releases/download/v${v.versionName}/ciji-v${v.versionName}.apk`,
+          }
+          const text = JSON.stringify(u, null, 2) + '\n'
+          fs.writeFileSync('dist-apk/update.json', text)
+          fs.writeFileSync('update.json', text)
+          console.log('update.json', text)
+          NODE
 
       - name: Create GitHub Release
         if: steps.should.outputs.exists == 'false'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -e
           TAG="${{ steps.ver.outputs.tag }}"
           CODE="${{ steps.ver.outputs.versionCode }}"
           NAME="${{ steps.ver.outputs.versionName }}"
@@ -144,11 +176,14 @@ jobs:
 
       - name: Commit update.json
         if: steps.should.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -e
           git config user.name "ciji-bot"
           git config user.email "ciji-bot@users.noreply.github.com"
           git add update.json version.json package.json android/app/build.gradle || true
           if ! git diff --cached --quiet; then
             git commit -m "chore: release v${{ steps.ver.outputs.versionName }} (versionCode ${{ steps.ver.outputs.versionCode }})"
-            git push
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" HEAD:main
           fi
