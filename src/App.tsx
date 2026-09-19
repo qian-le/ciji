@@ -1374,7 +1374,11 @@ function SettingsSheet(props: {
 
         <SectionTitle title="MiMo API" />
         <div className="card">
-          <Banner tone="info">API Key 仅保存在当前设备（IndexedDB），不会提交到 GitHub。</Banner>
+          <Banner tone="info">
+            安全模型：MiMo Key 不会出现在公网前端。
+            推荐：Cloudflare Worker Secret + 设置里的中继地址；或仅在本设备设置中保存 Key（IndexedDB）。
+            墨墨 Token 同样只存本机，不进仓库。
+          </Banner>
           <div className="field">
             <label>Base URL</label>
             <input value={mimoBaseUrl} onChange={(e) => setMimoBaseUrl(e.target.value)} />

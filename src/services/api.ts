@@ -293,10 +293,12 @@ export function parseImportPayload(text: string): RawSyncWord[] {
 }
 
 export async function chatComplete(settings: MimoSettings, messages: { role: string; content: string }[]): Promise<string> {
-  if (!settings.apiKey) {
-    throw new Error('请先在设置中填写 MiMo API Key（仅保存在本机）')
-  }
   const relay = aiRelayUrl()
+  if (!relay && !settings.apiKey) {
+    throw new Error(
+      'MiMo 未就绪：请部署 Cloudflare Worker 并配置 VITE_AI_RELAY_URL，或在设置中于本机保存 API Key（Key 不会出现在公网前端）。',
+    )
+  }
   const base = settings.baseUrl.replace(/\/$/, '')
   const url = relay || `${base}/chat/completions`
 
@@ -304,10 +306,11 @@ export async function chatComplete(settings: MimoSettings, messages: { role: str
     'Content-Type': 'application/json',
     Accept: 'application/json',
   }
-  if (!relay) {
-    headers.Authorization = `Bearer ${settings.apiKey}`
-  } else {
+  if (relay) {
+    // Worker 中继：Key 只在 Cloudflare Secret，前端不携带
     headers['X-Ciji-Client'] = 'web'
+  } else {
+    headers.Authorization = `Bearer ${settings.apiKey}`
   }
 
   const payload = {

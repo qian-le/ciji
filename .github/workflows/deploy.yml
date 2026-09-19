@@ -39,8 +39,9 @@ jobs:
           # 可选：显式 callback。留空则构建产物在运行时按当前域名推导
           VITE_MAIMEMO_REDIRECT_URI: ${{ vars.VITE_MAIMEMO_REDIRECT_URI || '' }}
           VITE_AI_RELAY_URL: ${{ vars.VITE_AI_RELAY_URL || '' }}
-          # 仓库 Secret；构建进前端包，公开 Pages 上可被查看——仅个人使用
-          VITE_MIMO_API_KEY: ${{ secrets.VITE_MIMO_API_KEY }}
+          # 安全：不要把 MiMo API Key 注入公开 Pages 构建。
+          # Key 应放在 Cloudflare Worker Secret，或仅保存在用户设备 IndexedDB。
+          # VITE_MIMO_API_KEY: 故意留空
         run: npm run build
 
       - name: Setup Pages

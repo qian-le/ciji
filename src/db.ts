@@ -199,8 +199,9 @@ export async function loadAppState(): Promise<AppState> {
   await migrateFromLocalStorageIfAny()
 
   let secrets = await getSetting<DeviceSecrets>('deviceSecrets', emptySecrets())
+  // 仅本地开发可用（.env 已 gitignore）；GitHub Pages 构建故意不注入，防止公网扒 Key
   const envKey = ((import.meta.env.VITE_MIMO_API_KEY as string | undefined) || '').trim()
-  if (!secrets.mimoApiKey && envKey) {
+  if (!secrets.mimoApiKey && envKey && window.location.hostname === 'localhost') {
     secrets = { ...secrets, mimoApiKey: envKey }
   }
 

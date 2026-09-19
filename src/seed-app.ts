@@ -2,6 +2,8 @@ import type { AppData, AppSettings } from './types'
 import { mimoDefaults } from './config'
 
 function envMimoKey(): string {
+  // 仅 localhost 开发构建可读入 .env；Pages 部署不注入，避免密钥出现在公网 JS
+  if (typeof window !== 'undefined' && window.location.hostname !== 'localhost') return ''
   const v = (import.meta.env.VITE_MIMO_API_KEY as string | undefined) || ''
   return v.trim()
 }

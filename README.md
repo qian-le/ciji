@@ -111,13 +111,18 @@ App 设置页：粘贴 Token → 保存 → 「测试 Token」→「同步学习
 - **导入备份**
 - 导出**不含** MiMo API Key、墨墨 Access/Refresh Token、OAuth 临时数据
 
-## 安全检查清单
+## 安全（务必读）
 
-- [x] `.gitignore` 忽略 `.env`、密钥、keystore、APK
-- [x] 源码中无硬编码 API Key / client_secret
-- [x] Access Token 仅存 IndexedDB，不进 Git
-- [x] 备份导出剥离 secrets
-- [ ] 你自己的 GitHub Secrets 只放 `VITE_MAIMEMO_CLIENT_ID` 等配置，不放 MiMo Key
+公开 GitHub Pages **不能**把 MiMo Key 构建进前端，否则任何人都能从 JS 里爬走。
+
+| 数据 | 正确位置 |
+|------|----------|
+| MiMo Key（推荐） | Cloudflare Worker Secret → `VITE_AI_RELAY_URL` |
+| MiMo Key（备用） | 仅本机设置页 → IndexedDB |
+| 墨墨 Token | 仅本机设置页 → IndexedDB |
+| 仓库 / Actions | **不要**注入 `VITE_MIMO_API_KEY` |
+
+详见 [docs/SECURITY.md](docs/SECURITY.md)。若 Key 曾进入公网包，请到开放平台**作废并重新生成**。
 
 ## 项目路径
 

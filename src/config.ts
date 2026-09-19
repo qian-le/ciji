@@ -35,10 +35,12 @@ export function maimemoConfig() {
 }
 
 export function mimoDefaults() {
+  const host = typeof window !== 'undefined' ? window.location.hostname : ''
+  const allowEnvKey = host === 'localhost' || host === '127.0.0.1'
   return {
     baseUrl: 'https://api.xiaomimimo.com/v1',
     model: 'mimo-v2.5',
-    apiKey: readEnv('VITE_MIMO_API_KEY'),
+    apiKey: allowEnvKey ? readEnv('VITE_MIMO_API_KEY') : '',
   }
 }
 
