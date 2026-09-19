@@ -1,0 +1,32 @@
+{
+  "words": [
+    {
+      "word": "maintain",
+      "meaning": "v. 维持；保持",
+      "type": "review",
+      "mastery": "weak",
+      "frequency": 4
+    },
+    {
+      "word": "preserve",
+      "meaning": "v. 保护；保存",
+      "type": "review",
+      "mastery": "weak",
+      "frequency": 3
+    },
+    {
+      "word": "adequate",
+      "meaning": "adj. 足够的；合格的",
+      "type": "new",
+      "mastery": "warn",
+      "frequency": 3
+    },
+    {
+      "word": "reluctant",
+      "meaning": "adj. 不情愿的",
+      "type": "new",
+      "mastery": "weak",
+      "frequency": 2
+    }
+  ]
+}
