@@ -9,7 +9,8 @@ import type {
   WordLearningRecord,
   WordRecord,
 } from './types'
-import { defaultSettings, seedAppData } from './seed-app'
+import { defaultSettings, isLikelySampleWordId } from './seed-app'
+import { buildSeedDayStats, buildSeedWords } from './seed'
 import { buildLocalHomeSummary, buildLocalReview, todayKey } from './analyzer'
 import { mimoDefaults } from './config'
 
@@ -197,43 +198,62 @@ export async function loadAppState(): Promise<AppState> {
   await db.open()
   await migrateFromLocalStorageIfAny()
 
+  let secrets = await getSetting<DeviceSecrets>('deviceSecrets', emptySecrets())
+  const envKey = ((import.meta.env.VITE_MIMO_API_KEY as string | undefined) || '').trim()
+  if (!secrets.mimoApiKey && envKey) {
+    secrets = { ...secrets, mimoApiKey: envKey }
+  }
+
   let settings = await getSetting<AppSettings | null>('appSettings', null)
   if (!settings) {
-    const seeded = seedAppData()
-    settings = seeded.settings
-    await setSetting('appSettings', settings)
-    if ((await db.words.count()) === 0) {
-      const now = new Date().toISOString()
-      await db.words.bulkPut(seeded.words.map((w) => ({ ...w, updatedAt: now })))
-      await db.dailySnapshots.bulkPut(seeded.dayStats.map((d) => ({ ...d, id: d.date })))
-      for (const w of seeded.words) {
-        for (const h of w.history) {
-          await db.wordLearningRecords.put({
-            id: `${w.id}-${h.date}-${h.type}`,
-            wordId: w.id,
-            word: w.word,
-            date: h.date,
-            type: h.type,
-            result: h.result,
-          })
-          await db.dailyLearning.put({
-            id: `${h.date}-${w.id}`,
-            date: h.date,
-            wordId: w.id,
-            word: w.word,
-            type: h.type,
-            mastery: w.mastery,
-          })
-        }
-      }
+    // 真实接入：首次打开不写入 mock 单词
+    settings = defaultSettings()
+    settings = {
+      ...settings,
+      mimo: { ...settings.mimo, apiKey: secrets.mimoApiKey || settings.mimo.apiKey },
     }
+    await setSetting('appSettings', settings)
   }
 
   settings = {
     ...defaultSettings(),
     ...settings,
     maimemo: { ...defaultSettings().maimemo, ...settings.maimemo },
-    mimo: { ...mimoDefaults(), ...settings.mimo },
+    mimo: {
+      ...mimoDefaults(),
+      ...settings.mimo,
+      // 本机 IndexedDB Key 优先；否则构建注入 / 环境 Key
+      apiKey: secrets.mimoApiKey || settings.mimo?.apiKey || envKey || '',
+    },
+  }
+
+  // 清理历史 mock：非 sample 模式下丢弃示例词，避免看起来像“假数据”
+  if (settings.dataSource !== 'sample') {
+    const existing = await db.words.toArray()
+    const sampleOnly = existing.length > 0 && existing.every((w) => isLikelySampleWordId(w.id))
+    if (sampleOnly) {
+      const hasRealToken = Boolean(secrets.maimemoAccessToken)
+      if (!hasRealToken) {
+        await db.transaction(
+          'rw',
+          db.words,
+          db.wordLearningRecords,
+          db.dailyLearning,
+          db.dailySnapshots,
+          db.aiDailyPackages,
+          async () => {
+            const ids = new Set(existing.map((w) => w.id))
+            await db.words.bulkDelete(existing.map((w) => w.id))
+            const records = await db.wordLearningRecords.toArray()
+            await db.wordLearningRecords.bulkDelete(records.filter((r) => ids.has(r.wordId)).map((r) => r.id))
+            const daily = await db.dailyLearning.toArray()
+            await db.dailyLearning.bulkDelete(daily.filter((d) => ids.has(d.wordId)).map((d) => d.id))
+            await db.dailySnapshots.clear()
+            await db.aiDailyPackages.clear()
+          },
+        )
+      }
+    }
   }
 
   const words = await db.words.toArray()
@@ -244,7 +264,6 @@ export async function loadAppState(): Promise<AppState> {
   const homes = packages.filter((p) => p.kind === 'home').map((p) => p.payload as AiHomeSummary)
   homes.sort((a, b) => (a.generatedAt < b.generatedAt ? 1 : -1))
   const quizRecords = await db.quizRecords.orderBy('date').reverse().toArray()
-  const secrets = await getSetting<DeviceSecrets>('deviceSecrets', emptySecrets())
 
   return {
     settings,
@@ -333,7 +352,15 @@ export async function putQuizRecord(record: QuizRecord): Promise<void> {
 }
 
 export async function resetToSampleData(): Promise<AppState> {
-  const seeded = seedAppData()
+  const seeded = {
+    settings: { ...defaultSettings(), dataSource: 'sample' as const },
+    words: buildSeedWords(),
+    dayStats: buildSeedDayStats(),
+    stories: [],
+    reviews: [],
+    homeSummary: null,
+    today: todayKey(),
+  }
   await db.transaction(
     'rw',
     db.words,

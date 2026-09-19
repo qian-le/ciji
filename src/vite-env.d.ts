@@ -7,6 +7,8 @@ interface ImportMetaEnv {
   readonly VITE_MAIMEMO_SCOPE?: string
   readonly VITE_MAIMEMO_REDIRECT_URI?: string
   readonly VITE_AI_RELAY_URL?: string
+  /** 构建时可选注入；勿提交到 git。公开 Pages 上会出现在前端包中 */
+  readonly VITE_MIMO_API_KEY?: string
 }
 
 interface ImportMeta {

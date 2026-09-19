@@ -38,6 +38,7 @@ export function mimoDefaults() {
   return {
     baseUrl: 'https://api.xiaomimimo.com/v1',
     model: 'mimo-v2.5',
+    apiKey: readEnv('VITE_MIMO_API_KEY'),
   }
 }
 

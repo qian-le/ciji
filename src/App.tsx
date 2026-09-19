@@ -247,12 +247,17 @@ export default function App() {
       if (settings.dataSource === 'sample') {
         const fresh = await resetToSampleData()
         setState(fresh)
-        setToast('已载入示例数据（演示模式）')
+        setToast('已切换到示例数据（演示模式）')
         return
       }
-      if (settings.dataSource === 'import' || !data.secrets.maimemoAccessToken) {
+      if (!data.secrets.maimemoAccessToken) {
         setShowSettings(true)
-        setToast(maimemoConnected ? '请在设置中导入今日单词' : '请先在设置中粘贴墨墨用户 Token，或导入 JSON')
+        setToast('真实接入：请粘贴墨墨用户 Token 后同步')
+        return
+      }
+      if (settings.dataSource === 'import' && !data.secrets.maimemoAccessToken) {
+        setShowSettings(true)
+        setToast('请在设置中导入今日单词，或填写 Token 同步')
         return
       }
       const bundle = await fetchMaimemoStudyBundle({
@@ -614,8 +619,18 @@ export default function App() {
               <div className="hero">
                 <div className="hero-top">
                   <div>
-                    <h2>{todayStats.totalCount ? '今天完成得不错' : '今天还没有学习记录'}</h2>
-                    <p>重点不是“背了多少”，而是找出哪些词正在反复遗忘。</p>
+                    <h2>
+                      {data.words.length === 0 && !maimemoConnected
+                        ? '连接墨墨，开始真实学习复盘'
+                        : todayStats.totalCount
+                          ? '今天完成得不错'
+                          : '今天还没有学习记录'}
+                    </h2>
+                    <p>
+                      {data.words.length === 0 && !maimemoConnected
+                        ? '本应用默认真实数据，不再使用 mock。设置里粘贴墨墨 Token → 同步。'
+                        : '重点不是“背了多少”，而是找出哪些词正在反复遗忘。'}
+                    </p>
                   </div>
                   <div className="score">{todayStats.score || '—'}</div>
                 </div>
@@ -701,13 +716,27 @@ export default function App() {
                   </div>
                 </div>
                 <div className="btn-row two">
+                  <button className="primary-btn" onClick={() => setShowSettings(true)} disabled={!!busy}>
+                    {maimemoConnected ? '墨墨设置' : '粘贴 Token'}
+                  </button>
                   <button className="primary-btn" onClick={handleSync} disabled={!!busy}>
                     {busy === '正在同步墨墨…' || busy === '同步中…' ? busy : '同步墨墨'}
                   </button>
-                  <button className="primary-btn" onClick={handleGenerateHomeAi} disabled={!!busy}>
-                    {busy === '生成今日总结…' ? busy : '生成今日复盘'}
-                  </button>
                 </div>
+                {!maimemoConnected && (
+                  <div className="btn-row">
+                    <button className="primary-btn" onClick={handleGenerateHomeAi} disabled={!!busy}>
+                      {busy === '生成今日总结…' ? busy : '生成今日复盘'}
+                    </button>
+                  </div>
+                )}
+                {maimemoConnected && (
+                  <div className="btn-row">
+                    <button className="primary-btn" onClick={handleGenerateHomeAi} disabled={!!busy}>
+                      {busy === '生成今日总结…' ? busy : '生成今日复盘'}
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </section>
@@ -1316,9 +1345,9 @@ function SettingsSheet(props: {
         <div className="field">
           <label>当前模式</label>
           <select value={dataSource} onChange={(e) => setDataSource(e.target.value as AppSettings['dataSource'])}>
-            <option value="sample">示例数据</option>
-            <option value="maimemo">墨墨用户 Token / API</option>
+            <option value="maimemo">墨墨真实数据（Token）</option>
             <option value="import">本地 JSON 导入</option>
+            <option value="sample">示例数据（仅演示）</option>
           </select>
         </div>
         <div className="field">
@@ -1423,7 +1452,7 @@ function SettingsSheet(props: {
             </label>
           </div>
           <button className="danger-btn" onClick={props.onResetSample}>
-            恢复示例数据
+            仅演示用：载入示例数据
           </button>
         </div>
 
