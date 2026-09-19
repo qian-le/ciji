@@ -1,139 +1,154 @@
-# 词迹（Ciji）PWA
+# 词迹（Ciji）Android App + GitHub Releases 在线更新
 
-墨墨背单词负责「记忆调度」，词迹负责「背完之后的分析、语境与二次记忆」。
+墨墨负责记忆调度，词迹负责背完后的分析、语境与二次记忆。
 
-**形态**：Web App + PWA + GitHub Pages（不再维护 Android APK / Capacitor / Gradle）
+**最终形态：Android App（Capacitor）**，通过 **GitHub Actions 自动签名发布 + App 内覆盖更新**。
 
-## 功能
+不再以 GitHub Pages 作为主交付路径（Pages 仅可选手动触发）。
 
-- 今日学习（新词/复习/完成度/连续天数/重点词）
-- 今日单词列表 + 单词详情（AI 例句、搭配、用法、易混、四级价值）
-- AI 今日故事（多模式，高亮词可点进详情）
-- AI 复盘（总结、最值得重看、易混词、建议）
-- Quiz 二次记忆
-- 7 日 / 30 日趋势与薄弱分析
-- 设置：墨墨 OIDC 登录、MiMo API Key（本机）、JSON 导入、数据备份
+---
 
-## 技术
+## 在线更新体验
 
-- Vite + React + TypeScript
-- PWA：`vite-plugin-pwa`（App Shell 离线缓存）
-- 本地数据：IndexedDB（Dexie）
-- 路由：Hash（`#/auth/callback`），兼容 GitHub Pages 子路径
-- 构建 `base: './'`
+```text
+打开词迹 → 后台检查 GitHub Releases / update.json
+→ 发现 versionCode 更大 → 弹出更新
+→ 立即更新 → 下载 APK → 系统安装确认 → 覆盖升级
+```
 
-## 本地开发
+- 升级判断：**只用 `versionCode` 数值比较**
+- `versionName` 仅展示
+- 包名始终 `com.ciji.wordtrail`
+- **同一 Signing Key** 才能覆盖安装
+- MiMo Key / 墨墨 Token / IndexedDB 学习数据：**更新后保留**（不打包进 APK）
+
+设置页：`关于词迹 → 当前版本 / 更新状态 / 检查更新`。
+
+---
+
+## 开发发布流程
+
+```text
+修改 version.json（versionCode +1，versionName 与 changelog）
+↓
+git push main
+↓
+GitHub Actions: 构建 Web → Capacitor Android → 签名 APK
+↓
+创建 Release vX.Y.Z 并上传 APK + update.json
+↓
+App 内检查更新 → 下载安装
+```
+
+### 修改版本
+
+编辑 `version.json`：
+
+```json
+{
+  "versionCode": 3,
+  "versionName": "1.2.0",
+  "changelog": ["新增...", "修复..."]
+}
+```
+
+本地可执行：`npm run release:prepare`（同步 package.json / gradle / update.json）。
+
+---
+
+## 签名（极重要）
+
+| 项 | 路径 / 名称 |
+|----|-------------|
+| Keystore | `android/keystore/ciji-release.jks`（**gitignore**） |
+| Alias | `ciji` |
+| properties | `android/keystore/keystore.properties`（**gitignore**） |
+| Base64 | `android/keystore/ciji-release.jks.base64.txt`（**gitignore**） |
+
+初始化：`npm run keystore:init`（或 `powershell -File scripts/init-keystore.ps1`）。
+
+### GitHub Secrets（Actions 用）
+
+| Secret | 来源 |
+|--------|------|
+| `ANDROID_KEYSTORE_BASE64` | `ciji-release.jks.base64.txt` 全文 |
+| `ANDROID_KEYSTORE_ALIAS` | `ciji` |
+| `ANDROID_KEYSTORE_PASSWORD` | props 中 `storePassword` |
+| `ANDROID_KEY_PASSWORD` | props 中 `keyPassword` |
+
+设置示例：
+
+```powershell
+Get-Content android\keystore\ciji-release.jks.base64.txt | gh secret set ANDROID_KEYSTORE_BASE64 --repo qian-le/ciji
+(Get-Content android\keystore\keystore.properties | ? {$_ -like 'storePassword=*'}) -replace 'storePassword=','' | gh secret set ANDROID_KEYSTORE_PASSWORD --repo qian-le/ciji
+# keyAlias / keyPassword 同理
+```
+
+> **Signing Key 一旦丢失，已安装的词迹将无法再被同包名新版覆盖升级。请把整个 `android/keystore/` 离线备份（U盘/私有网盘），不要只放在本机。**
+
+---
+
+## 本地构建
 
 ```powershell
 cd D:\ciji
 npm ci
-npm run dev
+npm run android:sync
+# 调试包
+cd android
+$env:JAVA_HOME="D:\java\jdk-21"
+$env:ANDROID_HOME="D:\Android\Sdk"
+.\gradlew assembleDebug
+# 发布包（需本地 keystore.properties）
+.\gradlew assembleRelease
 ```
 
-构建：
+产物：
 
-```powershell
-npm run build
-npm run preview
-```
+- Debug: `android/app/build/outputs/apk/debug/app-debug.apk`
+- Release: `android/app/build/outputs/apk/release/app-release.apk`
 
-## 部署 GitHub Pages（最少步骤）
+---
 
-1. 在 GitHub 新建仓库，建议名为 **`ciji`**（公开即可）。
-2. 把本目录推上去（**不要**提交 `.env`）：
+## 更新源
 
-```powershell
-cd D:\ciji
-git init
-git add .
-git commit -m "ciji pwa"
-git branch -M main
-git remote add origin https://github.com/<username>/ciji.git
-git push -u origin main
-```
+1. **优先**：`update.json`  
+   `https://raw.githubusercontent.com/qian-le/ciji/main/update.json`
+2. **回退**：GitHub Releases API `.../releases/latest`（资产中的 APK + `update.json`）
 
-3. 仓库 **Settings → Pages**：Source 选 **GitHub Actions**。
-4. **Settings → Secrets and variables → Actions**
-   - **不需要**把墨墨用户 Token 放进 Secrets
-   - Variables（可选）：`VITE_MAIMEMO_ISSUER` / `VITE_MAIMEMO_SCOPE` / `VITE_MAIMEMO_REDIRECT_URI`（仅 OIDC 高级路径用）
-5. 推送到 `main` 后，Actions 自动发布 Pages
-6. 打开：`https://qian-le.github.io/ciji/`
-7. 手机浏览器 → 菜单 → **添加到主屏幕**
+`version.json` → Actions 发布时写入 Release 与 `update.json` 的 `apkUrl`。
 
-### 墨墨数据接入（官方开放 API + 用户 Token）
+---
 
-文档：https://open.maimemo.com/document#/
+## 安全
 
-| 项 | 值 |
-|----|-----|
-| 获取 Token | 墨墨 App：我的 → 更多设置 → 实验功能 → 开放 API；或 https://open.maimemo.com/open/api/v1/tokens/openapi |
-| 请求头 | `Authorization: Bearer <Token>` |
-| 生产 Base | `https://open.maimemo.com/open` |
-| 今日单词 | `POST /api/v1/memo/study/get_today_items` |
-| 今日进度 | `POST /api/v1/memo/study/get_study_progress` |
-| 学习记录 | `POST /api/v1/memo/study/query_study_records` |
+- MiMo API Key：**不写入 APK**，设置页填写，存本机
+- 墨墨用户 Token：本机
+- Keystore / 密码：仅 Secrets + 本地 gitignore 目录
+- 公开 Pages 不再注入 `VITE_MIMO_API_KEY`
+- 详见 `docs/SECURITY.md`
 
-App 设置页：粘贴 Token → 保存 → 「测试 Token」→「同步学习数据」。
+---
 
-注意（官方说明）：
+## 目录
 
-- 学习数据接口为**公测**，不保证可用性
-- 需在墨墨 App 中**开启自动同步**
-- 若当日未打开 App 初始化，今日列表可能为空
-- Token **只存本机 IndexedDB**，不进 GitHub、不进备份导出
+| 路径 | 说明 |
+|------|------|
+| `D:\ciji` | 主工程 |
+| `version.json` | 版本唯一来源（versionCode/Name/changelog） |
+| `update.json` | App 检查源（发布后由 Actions 更新） |
+| `src/services/updater.ts` | 版本检查逻辑 |
+| `src/services/cijiUpdater.ts` | 原生下载/安装插件封装 |
+| `src/components/UpdatePanel.tsx` | 关于与更新 UI |
+| `android/.../CijiUpdaterPlugin.java` | DownloadManager + PackageInstaller |
+| `.github/workflows/android-release.yml` | 自动签名发布 |
 
-响应字段映射：`voc_spelling` → 单词，`is_new` → 新词/复习，`first_response`/`last_response`（FAMILIAR/VAGUE/FORGET/WELL_FAMILIAR）→ 掌握度，`study_count` → 频次，`tags: STICKING` → 薄弱。
+---
 
-## MiMo API
+## 更新器行为
 
-- 默认 `https://api.xiaomimimo.com/v1` + `mimo-v2.5`
-- **不要**把 API Key 写进源码或 `.env` 提交 GitHub
-- 在 App「设置 → MiMo API」中填写，Key **仅保存在本机 IndexedDB**
-- 设置页提供「测试连接」
-- **CORS 实测（2026-09）**：`api.xiaomimimo.com` 返回 `Access-Control-Allow-Origin: *`，浏览器可直连
-- 若你的网络仍失败：部署 `cloudflare/worker.js`，`wrangler secret put MIMO_API_KEY`，并设置 `VITE_AI_RELAY_URL`
-
-## 数据与备份
-
-本地 IndexedDB 表：
-
-- `words`
-- `wordLearningRecords`
-- `dailyLearning`
-- `dailySnapshots`
-- `aiDailyPackages`
-- `quizRecords`
-- `settings`（含本机 secrets，导出时剥离）
-
-设置 → 数据管理：
-
-- **导出全部数据** → `ciji-backup-YYYY-MM-DD.json`
-- **导入备份**
-- 导出**不含** MiMo API Key、墨墨 Access/Refresh Token、OAuth 临时数据
-
-## 安全（务必读）
-
-公开 GitHub Pages **不能**把 MiMo Key 构建进前端，否则任何人都能从 JS 里爬走。
-
-| 数据 | 正确位置 |
-|------|----------|
-| MiMo Key（推荐） | Cloudflare Worker Secret → `VITE_AI_RELAY_URL` |
-| MiMo Key（备用） | 仅本机设置页 → IndexedDB |
-| 墨墨 Token | 仅本机设置页 → IndexedDB |
-| 仓库 / Actions | **不要**注入 `VITE_MIMO_API_KEY` |
-
-详见 [docs/SECURITY.md](docs/SECURITY.md)。若 Key 曾进入公网包，请到开放平台**作废并重新生成**。
-
-## 项目路径
-
-| 项 | 路径 |
-|----|------|
-| 源码（请用此路径建 git） | `D:\ciji` |
-| 本地预览产物 | `dist/` |
-| 历史 Android 镜像（已停更） | `D:\词迹` |
-
-## 离线行为
-
-- App Shell / JS / CSS / 图标由 Service Worker 缓存
-- 已同步单词、故事、复盘、Quiz 历史、趋势可离线查看
-- 离线点击「同步墨墨 / 生成 AI」→ 提示 **当前无网络连接。**
+- 启动约 2.5s 后后台检查一次（不阻塞首屏）
+- 设置页可手动「检查更新」
+- 支持下载进度、取消、失败重试
+- 点击「立即更新」下载 APK 后调用系统安装界面
+- 用户可在系统层取消安装

@@ -39,6 +39,7 @@ import {
 } from './services/oidc'
 import { maimemoConfig } from './config'
 import { Banner, BottomNav, Empty, MiniChart, SectionTitle, Toast } from './components'
+import { UpdatePanel } from './components/UpdatePanel'
 
 function masteryClass(m: WordRecord['mastery']) {
   return m === 'good' ? 'm-good' : m === 'warn' ? 'm-warn' : 'm-bad'
@@ -705,6 +706,9 @@ export default function App() {
                   )}
                 />
               </div>
+
+              <SectionTitle title="App 更新" />
+              <UpdatePanel compact />
 
               <SectionTitle title="AI 今日总结" />
               <div className="card">
@@ -1431,6 +1435,9 @@ function SettingsSheet(props: {
         <button className="primary-btn" onClick={props.onImportJson}>
           导入 JSON
         </button>
+
+        <SectionTitle title="关于与更新" />
+        <UpdatePanel />
 
         <SectionTitle title="数据管理" />
         <div className="card">

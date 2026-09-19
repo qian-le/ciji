@@ -1,0 +1,17 @@
+{
+  "versionCode": 2,
+  "versionName": "1.1.0",
+  "minVersionCode": 1,
+  "force": false,
+  "releasedAt": "2026-09-19T07:30:00.000Z",
+  "changelog": [
+    "墨墨开放 API 用户 Token 真实同步",
+    "MiMo 密钥仅存本机，不打包进 APK",
+    "App 内检查更新与覆盖安装",
+    "GitHub Actions 自动签名发布"
+  ],
+  "github": {
+    "owner": "qian-le",
+    "repo": "ciji"
+  }
+}
