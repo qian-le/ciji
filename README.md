@@ -53,29 +53,36 @@ git push -u origin main
 ```
 
 3. 仓库 **Settings → Pages**：Source 选 **GitHub Actions**。
-4. 仓库 **Settings → Secrets and variables → Actions**：
-   - **Secrets** 增加：`VITE_MAIMEMO_CLIENT_ID`（墨墨开放平台的 client_id，可公开，但用 Secret 管理更省事）
-   - **Variables**（可选）：
-     - `VITE_MAIMEMO_ISSUER` = `https://accounts.maimemo.com/oidc`
-     - `VITE_MAIMEMO_SCOPE` = `openid profile`
-     - `VITE_MAIMEMO_REDIRECT_URI` = `https://<username>.github.io/ciji/auth/callback`
-     - `VITE_AI_RELAY_URL` = （仅当需要 Worker 时）
-5. 推送到 `main` 后，Actions 会自动 `npm ci && npm run build` 并发布 Pages。
-6. 打开：`https://<username>.github.io/ciji/`
-7. 手机浏览器 → 菜单 → **添加到主屏幕**。
+4. **Settings → Secrets and variables → Actions**
+   - **不需要**把墨墨用户 Token 放进 Secrets
+   - Variables（可选）：`VITE_MAIMEMO_ISSUER` / `VITE_MAIMEMO_SCOPE` / `VITE_MAIMEMO_REDIRECT_URI`（仅 OIDC 高级路径用）
+5. 推送到 `main` 后，Actions 自动发布 Pages
+6. 打开：`https://qian-le.github.io/ciji/`
+7. 手机浏览器 → 菜单 → **添加到主屏幕**
 
-### 墨墨开放平台填写
+### 墨墨数据接入（官方开放 API + 用户 Token）
+
+文档：https://open.maimemo.com/document#/
 
 | 项 | 值 |
 |----|-----|
-| 主页 | `https://<username>.github.io/ciji/` |
-| Redirect URI | `https://<username>.github.io/ciji/auth/callback` |
-| 应用类型 | 纯前端 / SPA（Authorization Code + **PKCE**） |
-| client_secret | **不要**填进本仓库或前端代码 |
+| 获取 Token | 墨墨 App：我的 → 更多设置 → 实验功能 → 开放 API；或 https://open.maimemo.com/open/api/v1/tokens/openapi |
+| 请求头 | `Authorization: Bearer <Token>` |
+| 生产 Base | `https://open.maimemo.com/open` |
+| 今日单词 | `POST /api/v1/memo/study/get_today_items` |
+| 今日进度 | `POST /api/v1/memo/study/get_study_progress` |
+| 学习记录 | `POST /api/v1/memo/study/query_study_records` |
 
-本地开发回调：`http://localhost:5173/auth/callback`（若开放平台允许 localhost）。
+App 设置页：粘贴 Token → 保存 → 「测试 Token」→「同步学习数据」。
 
-本地环境变量见 `.env.example`，复制为 `.env` 后填写 `VITE_MAIMEMO_CLIENT_ID`。
+注意（官方说明）：
+
+- 学习数据接口为**公测**，不保证可用性
+- 需在墨墨 App 中**开启自动同步**
+- 若当日未打开 App 初始化，今日列表可能为空
+- Token **只存本机 IndexedDB**，不进 GitHub、不进备份导出
+
+响应字段映射：`voc_spelling` → 单词，`is_new` → 新词/复习，`first_response`/`last_response`（FAMILIAR/VAGUE/FORGET/WELL_FAMILIAR）→ 掌握度，`study_count` → 频次，`tags: STICKING` → 薄弱。
 
 ## MiMo API
 

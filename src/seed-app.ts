@@ -7,7 +7,7 @@ export function defaultSettings(): AppSettings {
   return {
     dataSource: 'sample',
     maimemo: {
-      baseUrl: 'https://open.maimemo.com',
+      baseUrl: 'https://open.maimemo.com/open',
       clientId: '',
       redirectUri: '',
       scope: 'openid profile',

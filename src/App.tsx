@@ -29,7 +29,7 @@ import {
   type BackupFile,
 } from './db'
 import { buildSeedDayStats } from './seed'
-import { fetchMaimemoWords, isOnline, normalizeSyncWords, parseImportPayload, testMimoConnection } from './services/api'
+import { fetchMaimemoStudyBundle, isOnline, normalizeSyncWords, parseImportPayload, testMaimemoToken, testMimoConnection } from './services/api'
 import { buildQuizSet, generateHomeSummary, generateReview, generateStory, generateWordAi } from './services/ai'
 import {
   beginMaimemoLogin,
@@ -170,6 +170,9 @@ export default function App() {
     return () => clearTimeout(t)
   }, [toast])
 
+  const [maimemoTokenInput, setMaimemoTokenInput] = useState('')
+  const [showOidcAdvanced, setShowOidcAdvanced] = useState(Boolean(maimemoConfig().clientId))
+
   const data = state
   const todayWords = useMemo(() => (data ? getTodayWords(data.words) : []), [data])
   const todayStats = useMemo(
@@ -249,16 +252,22 @@ export default function App() {
       }
       if (settings.dataSource === 'import' || !data.secrets.maimemoAccessToken) {
         setShowSettings(true)
-        setToast(maimemoConnected ? '请在设置中导入今日单词' : '请先登录墨墨，或导入 JSON')
+        setToast(maimemoConnected ? '请在设置中导入今日单词' : '请先在设置中粘贴墨墨用户 Token，或导入 JSON')
         return
       }
-      const raw = await fetchMaimemoWords({
+      const bundle = await fetchMaimemoStudyBundle({
         baseUrl: settings.maimemo.baseUrl,
         accessToken: data.secrets.maimemoAccessToken,
-        accountId: settings.maimemo.accountId || data.secrets.maimemoUser?.sub,
       })
-      const incoming = normalizeSyncWords(raw, todayKey())
-      if (!incoming.length) throw new Error('没有解析到单词')
+      if (!bundle.rawWords.length) {
+        throw new Error(
+          '今日学习单词为空。请确认今日已打开墨墨并学习/初始化，且 App 开启了自动同步。公测接口：POST .../memo/study/get_today_items',
+        )
+      }
+      const incoming = normalizeSyncWords(bundle.rawWords, todayKey())
+      // 用官方进度覆盖完成度（若有）
+      let snapOverride: { finished?: number; total?: number } | null = null
+      if (bundle.progress) snapOverride = bundle.progress
 
       const map = new Map(data.words.map((w) => [w.word.toLowerCase(), w]))
       for (const w of incoming) {
@@ -279,7 +288,20 @@ export default function App() {
       }
       const words = Array.from(map.values())
       await upsertWords(words)
-      const snap = getTodayStats(words, settings.targetDaily)
+      const localSnap = getTodayStats(words, settings.targetDaily)
+      const todayNew = incoming.filter((w) => w.type === 'new').length
+      const todayReview = incoming.filter((w) => w.type === 'review').length
+      const snap = snapOverride
+        ? {
+            ...localSnap,
+            newCount: todayNew,
+            reviewCount: todayReview,
+            totalCount: snapOverride.total ?? incoming.length,
+            score: snapOverride.total
+              ? Math.min(100, Math.round(((snapOverride.finished ?? 0) / snapOverride.total) * 100))
+              : localSnap.score,
+          }
+        : localSnap
       await putSnapshot({ ...snap, id: snap.date })
       const nextSettings: AppSettings = {
         ...settings,
@@ -390,6 +412,36 @@ export default function App() {
     }
   }
 
+  async function handleSaveMaimemoToken(token: string, baseUrl?: string) {
+    if (!data) return
+    const trimmed = token.trim()
+    if (!trimmed) {
+      setToast('请粘贴墨墨用户 Token')
+      return
+    }
+    const secrets = {
+      ...data.secrets,
+      maimemoAccessToken: trimmed,
+      maimemoUser: { name: '墨墨用户 Token' },
+    }
+    await persistSecrets(secrets)
+    const settings: AppSettings = {
+      ...data.settings,
+      dataSource: 'maimemo',
+      maimemo: {
+        ...data.settings.maimemo,
+        baseUrl: (baseUrl || data.settings.maimemo.baseUrl).trim() || data.settings.maimemo.baseUrl,
+        accessToken: '',
+        connected: true,
+        userLabel: '墨墨用户 Token',
+        accountId: data.settings.maimemo.accountId,
+      },
+    }
+    await persistSettings(settings)
+    await reload()
+    setToast('墨墨 Token 已保存在本机，可点「同步学习数据」')
+  }
+
   async function handleLoginMaimemo() {
     if (!isOnline()) {
       setToast('当前无网络连接。')
@@ -397,7 +449,7 @@ export default function App() {
     }
     const cfg = maimemoConfig()
     if (!cfg.clientId) {
-      setToast('未配置 Client ID。请在仓库 Secrets 设置 VITE_MAIMEMO_CLIENT_ID 后部署，或本地 .env 配置。')
+      setToast('当前主路径是「粘贴用户 Token」。OIDC 需先配置 Client ID（可选）。')
       return
     }
     try {
@@ -412,7 +464,30 @@ export default function App() {
   async function handleLogoutMaimemo() {
     await clearMaimemoConnection()
     await reload()
-    setToast('已断开墨墨连接')
+    setToast('已断开墨墨连接（Token 已从本机清除）')
+  }
+
+  async function handleTestMaimemo() {
+    if (!data) return
+    if (!isOnline()) {
+      setToast('当前无网络连接。')
+      return
+    }
+    setBusy('测试墨墨 Token…')
+    try {
+      const token = data.secrets.maimemoAccessToken
+      if (!token) {
+        setToast('请先保存 Token')
+        return
+      }
+      const result = await testMaimemoToken({
+        baseUrl: data.settings.maimemo.baseUrl,
+        accessToken: token,
+      })
+      setToast(result.message)
+    } finally {
+      setBusy(null)
+    }
   }
 
   async function handleSaveMimoKey() {
@@ -1064,6 +1139,12 @@ export default function App() {
           onLoginMaimemo={handleLoginMaimemo}
           onLogoutMaimemo={handleLogoutMaimemo}
           onSync={handleSync}
+          maimemoTokenInput={maimemoTokenInput}
+          setMaimemoTokenInput={setMaimemoTokenInput}
+          onSaveMaimemoToken={handleSaveMaimemoToken}
+          onTestMaimemo={handleTestMaimemo}
+          showOidcAdvanced={showOidcAdvanced}
+          setShowOidcAdvanced={setShowOidcAdvanced}
           onSaveMimoKey={handleSaveMimoKey}
           onTestMimo={handleTestMimo}
           onImportJson={handleImportJson}
@@ -1089,6 +1170,12 @@ function SettingsSheet(props: {
   online: boolean
   maimemoConnected: boolean
   maimemoUserLabel: string
+  maimemoTokenInput: string
+  setMaimemoTokenInput: (v: string) => void
+  onSaveMaimemoToken: (token: string, baseUrl?: string) => Promise<void>
+  onTestMaimemo: () => void
+  showOidcAdvanced: boolean
+  setShowOidcAdvanced: (v: boolean) => void
   mimoKeyInput: string
   setMimoKeyInput: (v: string) => void
   importText: string
@@ -1112,6 +1199,9 @@ function SettingsSheet(props: {
   const [mimoBaseUrl, setMimoBaseUrl] = useState(data.settings.mimo.baseUrl)
   const [mimoModel, setMimoModel] = useState(data.settings.mimo.model)
   const cfg = maimemoConfig()
+  const tokenMasked = data.secrets.maimemoAccessToken
+    ? `${data.secrets.maimemoAccessToken.slice(0, 6)}…${data.secrets.maimemoAccessToken.slice(-4)}`
+    : ''
 
   return (
     <div className="modal show" onClick={(e) => e.target === e.currentTarget && props.onClose()}>
@@ -1125,39 +1215,63 @@ function SettingsSheet(props: {
 
         <SectionTitle title="墨墨账号" />
         <div className="card">
-          <div className="row">
-            <div>
-              <div style={{ fontWeight: 700, marginBottom: 6 }}>
-                <span className={`conn-dot ${props.maimemoConnected ? 'on' : ''}`} />
-                {props.maimemoConnected ? '已连接' : '未连接'}
-              </div>
-              <div className="help">
-                {props.maimemoConnected
-                  ? `用户：${props.maimemoUserLabel || '墨墨用户'}`
-                  : '使用 OIDC Authorization Code + PKCE，无需 client_secret'}
-              </div>
-              <div className="help" style={{ marginTop: 6 }}>
-                Issuer：{cfg.issuer}
-                <br />
-                Callback：{cfg.redirectUri}
-                <br />
-                Client ID：{cfg.clientId ? `${cfg.clientId.slice(0, 6)}…` : '未配置'}
-              </div>
-            </div>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>
+            <span className={`conn-dot ${props.maimemoConnected ? 'on' : ''}`} />
+            {props.maimemoConnected ? '已连接' : '未连接'}
           </div>
+          <div className="help" style={{ marginBottom: 10 }}>
+            {props.maimemoConnected
+              ? `用户：${props.maimemoUserLabel || '墨墨用户'}${tokenMasked ? ` · Token ${tokenMasked}` : ''}`
+              : '主路径：粘贴墨墨用户 Token（App：我的 → 更多设置 → 实验功能 → 开放 API，或 open.maimemo.com/open/api/v1/tokens/openapi）。Token 仅保存在本机。'}
+          </div>
+
+          <div className="field">
+            <label>用户 Token</label>
+            <input
+              type="password"
+              value={props.maimemoTokenInput}
+              onChange={(e) => props.setMaimemoTokenInput(e.target.value)}
+              placeholder="粘贴你的墨墨用户 Token"
+              autoComplete="off"
+            />
+          </div>
+          <div className="field">
+            <label>API Base URL（官方生产前缀）</label>
+            <input
+              value={maimemoBaseUrl}
+              onChange={(e) => setMaimemoBaseUrl(e.target.value)}
+              placeholder="https://open.maimemo.com/open"
+            />
+            <p className="help" style={{ marginTop: 6 }}>
+              官方文档 https://open.maimemo.com/document#/ 。同步调用：
+              <br />
+              POST /api/v1/memo/study/get_today_items
+              <br />
+              POST /api/v1/memo/study/get_study_progress
+              <br />
+              Authorization: Bearer &lt;Token&gt;。公测接口，需墨墨 App 开启自动同步。
+            </p>
+          </div>
+
           <div className="btn-row two">
-            {!props.maimemoConnected ? (
-              <button className="primary-btn" onClick={props.onLoginMaimemo} disabled={!!props.busy || !props.online}>
-                登录墨墨
-              </button>
-            ) : (
+            <button
+              className="primary-btn"
+              onClick={async () => {
+                await props.onSaveMaimemoToken(props.maimemoTokenInput, maimemoBaseUrl)
+                props.setMaimemoTokenInput('')
+              }}
+              disabled={!!props.busy}
+            >
+              保存 Token
+            </button>
+            <button className="primary-btn" onClick={props.onTestMaimemo} disabled={!!props.busy || !props.online || !props.maimemoConnected}>
+              测试 Token
+            </button>
+          </div>
+          <div className="btn-row">
+            {props.maimemoConnected ? (
               <button className="primary-btn" onClick={props.onSync} disabled={!!props.busy || !props.online}>
                 同步学习数据
-              </button>
-            )}
-            {props.maimemoConnected ? (
-              <button className="primary-btn" onClick={props.onLogoutMaimemo}>
-                退出连接
               </button>
             ) : (
               <button className="primary-btn" onClick={props.onSync}>
@@ -1165,6 +1279,37 @@ function SettingsSheet(props: {
               </button>
             )}
           </div>
+          {props.maimemoConnected && (
+            <button className="danger-btn" onClick={props.onLogoutMaimemo}>
+              退出连接（清除本机 Token）
+            </button>
+          )}
+
+          <div style={{ marginTop: 12 }}>
+            <button
+              className="secondary-btn"
+              type="button"
+              onClick={() => props.setShowOidcAdvanced(!props.showOidcAdvanced)}
+            >
+              {props.showOidcAdvanced ? '收起 OIDC 高级选项' : '高级：OIDC PKCE（可选）'}
+            </button>
+          </div>
+          {props.showOidcAdvanced && (
+            <div style={{ marginTop: 10 }}>
+              <p className="help">
+                若你已在墨墨开放平台申请了纯前端应用，可尝试 OIDC 登录。当前产品主路径是用户 Token。
+                <br />
+                Issuer：{cfg.issuer}
+                <br />
+                Callback：{cfg.redirectUri}
+                <br />
+                Client ID：{cfg.clientId ? `${cfg.clientId.slice(0, 8)}…` : '未配置（无需也可）'}
+              </p>
+              <button className="secondary-btn" onClick={props.onLoginMaimemo} disabled={!props.online || !cfg.clientId}>
+                尝试 OIDC 登录墨墨
+              </button>
+            </div>
+          )}
         </div>
 
         <SectionTitle title="数据源" />
@@ -1172,7 +1317,7 @@ function SettingsSheet(props: {
           <label>当前模式</label>
           <select value={dataSource} onChange={(e) => setDataSource(e.target.value as AppSettings['dataSource'])}>
             <option value="sample">示例数据</option>
-            <option value="maimemo">墨墨开放 API</option>
+            <option value="maimemo">墨墨用户 Token / API</option>
             <option value="import">本地 JSON 导入</option>
           </select>
         </div>
