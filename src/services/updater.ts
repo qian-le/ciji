@@ -69,28 +69,35 @@ export function pickApkUrl(assets: { name: string; browser_download_url: string 
 }
 
 export async function fetchUpdateJson(url = updateJsonUrl()): Promise<UpdateInfo | null> {
-  const res = await fetch(url, { headers: { Accept: 'application/json' }, cache: 'no-store' })
-  if (!res.ok) return null
-  const data = (await res.json()) as {
-    versionCode?: number
-    versionName?: string
-    apkUrl?: string
-    changelog?: string[] | string
-    force?: boolean
-  }
-  if (!data.versionCode || !data.apkUrl) return null
-  const changelog = Array.isArray(data.changelog)
-    ? data.changelog
-    : String(data.changelog || '')
-        .split(/\r?\n/)
-        .filter(Boolean)
-  return {
-    versionCode: Number(data.versionCode),
-    versionName: String(data.versionName || data.versionCode),
-    apkUrl: data.apkUrl,
-    changelog,
-    force: Boolean(data.force),
-    source: 'update-json',
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), 12000)
+  try {
+    const res = await fetch(url, { headers: { Accept: 'application/json' }, cache: 'no-store', signal: ac.signal })
+    if (!res.ok) return null
+    const data = (await res.json()) as {
+      versionCode?: number
+      versionName?: string
+      apkUrl?: string
+      changelog?: string[] | string
+      force?: boolean
+    }
+    if (!data.versionCode || !data.apkUrl) return null
+    const changelog = Array.isArray(data.changelog)
+      ? data.changelog.slice(0, 20)
+      : String(data.changelog || '')
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .slice(0, 20)
+    return {
+      versionCode: Number(data.versionCode),
+      versionName: String(data.versionName || data.versionCode),
+      apkUrl: data.apkUrl,
+      changelog,
+      force: Boolean(data.force),
+      source: 'update-json',
+    }
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -98,43 +105,50 @@ export async function fetchUpdateFromGitHubRelease(
   owner = UPDATE_OWNER,
   repo = UPDATE_REPO,
 ): Promise<UpdateInfo | null> {
-  const res = await fetch(latestReleaseApiUrl(owner, repo), {
-    headers: { Accept: 'application/vnd.github+json' },
-    cache: 'no-store',
-  })
-  if (!res.ok) return null
-  const data = (await res.json()) as {
-    tag_name?: string
-    body?: string
-    html_url?: string
-    assets?: { name: string; browser_download_url: string }[]
-    draft?: boolean
-    prerelease?: boolean
-  }
-  if (data.draft) return null
-  const assets = data.assets || []
-  const apkUrl = pickApkUrl(assets)
-  if (!apkUrl) return null
-  const body = data.body || ''
-  const versionCode = extractVersionCodeFromRelease(body, data.tag_name || '', assets)
-  const updateAsset = assets.find((a) => a.name === 'update.json')
-  if (updateAsset) {
-    try {
-      const u = await fetchUpdateJson(updateAsset.browser_download_url)
-      if (u) return { ...u, htmlUrl: data.html_url, source: 'github-release' }
-    } catch {
-      /* fallthrough */
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), 12000)
+  try {
+    const res = await fetch(latestReleaseApiUrl(owner, repo), {
+      headers: { Accept: 'application/vnd.github+json' },
+      cache: 'no-store',
+      signal: ac.signal,
+    })
+    if (!res.ok) return null
+    const data = (await res.json()) as {
+      tag_name?: string
+      body?: string
+      html_url?: string
+      assets?: { name: string; browser_download_url: string }[]
+      draft?: boolean
+      prerelease?: boolean
     }
-  }
-  if (!versionCode) return null
-  return {
-    versionCode,
-    versionName: (data.tag_name || '').replace(/^v/i, '') || String(versionCode),
-    apkUrl,
-    changelog: parseChangelog(body),
-    force: /force\s*:\s*true/i.test(body),
-    htmlUrl: data.html_url,
-    source: 'github-release',
+    if (data.draft) return null
+    const assets = data.assets || []
+    const apkUrl = pickApkUrl(assets)
+    if (!apkUrl) return null
+    const body = data.body || ''
+    const versionCode = extractVersionCodeFromRelease(body, data.tag_name || '', assets)
+    const updateAsset = assets.find((a) => a.name === 'update.json')
+    if (updateAsset) {
+      try {
+        const u = await fetchUpdateJson(updateAsset.browser_download_url)
+        if (u) return { ...u, htmlUrl: data.html_url, source: 'github-release' }
+      } catch {
+        /* fallthrough */
+      }
+    }
+    if (!versionCode) return null
+    return {
+      versionCode,
+      versionName: (data.tag_name || '').replace(/^v/i, '') || String(versionCode),
+      apkUrl,
+      changelog: parseChangelog(body),
+      force: /force\s*:\s*true/i.test(body),
+      htmlUrl: data.html_url,
+      source: 'github-release',
+    }
+  } finally {
+    clearTimeout(timer)
   }
 }
 

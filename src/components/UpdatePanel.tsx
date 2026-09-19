@@ -18,12 +18,23 @@ export function UpdatePanel({ compact = false }: { compact?: boolean }) {
   const [message, setMessage] = useState('')
   const [apkPath, setApkPath] = useState<string | null>(null)
   const listenerRef = useRef<{ remove: () => Promise<void> } | null>(null)
+  const mountedRef = useRef(true)
+  const checkAbortRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      checkAbortRef.current?.abort()
+      checkAbortRef.current = null
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
     ;(async () => {
       const info = await getBuildInfoSafe()
-      if (!cancelled) setBuild(info)
+      if (!cancelled && mountedRef.current) setBuild(info)
     })()
     return () => {
       cancelled = true
@@ -31,29 +42,41 @@ export function UpdatePanel({ compact = false }: { compact?: boolean }) {
   }, [])
 
   useEffect(() => {
+    let removed = false
     ;(async () => {
       try {
         const handle = await CijiUpdater.addListener('downloadProgress', (p: DownloadProgress) => {
-          setProgress(p.percent || 0)
+          if (mountedRef.current) setProgress(p.percent || 0)
         })
+        if (removed) {
+          handle.remove?.().catch(() => {})
+          return
+        }
         listenerRef.current = handle
       } catch {
         /* browser preview */
       }
     })()
     return () => {
-      listenerRef.current?.remove?.().catch(() => {})
+      removed = true
+      const h = listenerRef.current
+      listenerRef.current = null
+      h?.remove?.().catch(() => {})
     }
   }, [])
 
   const runCheck = useCallback(async (silent = false) => {
     if (!build) return null
+    checkAbortRef.current?.abort()
+    const ac = new AbortController()
+    checkAbortRef.current = ac
     if (!silent) {
       setPhase('checking')
       setMessage('正在检查更新…')
     }
     try {
       const info = await checkForUpdate(build.versionCode)
+      if (!mountedRef.current || ac.signal.aborted) return null
       if (!info) {
         setPhase('latest')
         setUpdate(null)
@@ -65,6 +88,7 @@ export function UpdatePanel({ compact = false }: { compact?: boolean }) {
       setMessage(`发现新版本 v${info.versionName}`)
       return info
     } catch (e) {
+      if (!mountedRef.current || ac.signal.aborted) return null
       setPhase('error')
       setMessage(e instanceof Error ? e.message : '检查更新失败')
       return null

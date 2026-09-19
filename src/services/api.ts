@@ -1,8 +1,14 @@
+import { Capacitor, CapacitorHttp } from '@capacitor/core'
 import type { Mastery, MimoSettings, WordRecord, WordType } from '../types'
 import { aiRelayUrl } from '../config'
 
 /** 墨墨开放 API 生产前缀（官方文档 servers.url） */
 export const MAIMEMO_OPEN_BASE = 'https://open.maimemo.com/open'
+
+const MAX_RECORDS = 1000
+const MAX_HISTORY_PER_WORD = 30
+const MAX_WORDS = 3000
+const FETCH_TIMEOUT_MS = 20000
 
 export interface RawSyncWord {
   word: string
@@ -18,6 +24,17 @@ export interface RawSyncWord {
   focus?: boolean
   finished?: boolean
   studyCount?: number
+}
+
+export type HistItem = { date: string; type: WordType; result: 'remembered' | 'forgot' | 'partial' }
+
+export interface MaimemoDayBucket {
+  date: string
+  newCount: number
+  reviewCount: number
+  totalCount: number
+  focusCount: number
+  score: number
 }
 
 interface MaimemoStudyTodayItem {
@@ -49,6 +66,7 @@ interface MaimemoStudyProgress {
 
 function normalizeMastery(input?: string): Mastery {
   const s = (input || '').toUpperCase()
+  if (s.includes('UNSPECIFIED')) return 'warn'
   if (s === 'FORGET' || s.includes('FORGET') || s === 'BAD' || s.includes('WRONG')) return 'weak'
   if (s === 'VAGUE' || s === 'CANCEL_WELL_FAMILIAR' || s.includes('PARTIAL') || s.includes('HARD')) return 'warn'
   if (s === 'FAMILIAR' || s === 'WELL_FAMILIAR' || s.includes('REMEMBER') || s === 'GOOD' || s.includes('KNOW')) return 'good'
@@ -68,10 +86,45 @@ function responseToMastery(resp?: string | { response?: string; value?: string }
   return normalizeMastery(raw)
 }
 
+function responseToResult(m: Mastery): HistItem['result'] {
+  return m === 'weak' ? 'forgot' : m === 'warn' ? 'partial' : 'remembered'
+}
+
+function tagsList(tags?: string | string[]): string[] {
+  if (!tags) return []
+  return (Array.isArray(tags) ? tags : String(tags).split(/[,;\s]+/)).filter(Boolean).slice(0, 12)
+}
+
 function tagsToWeak(tags?: string | string[]): boolean {
-  if (!tags) return false
-  const list = Array.isArray(tags) ? tags : String(tags).split(/[,;\s]+/)
-  return list.some((t) => String(t).toUpperCase().includes('STICKING'))
+  return tagsList(tags).some((t) => t.toUpperCase().includes('STICKING'))
+}
+
+/** 墨墨 ISO 时间 → 本地 YYYY-MM-DD */
+export function localDateKey(iso?: string): string | null {
+  if (!iso) return null
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return null
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function withinLastDays(iso: string | undefined, days: number, now: Date): boolean {
+  if (!iso) return false
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return false
+  const cutoff = new Date(now)
+  cutoff.setHours(0, 0, 0, 0)
+  cutoff.setDate(cutoff.getDate() - (days - 1))
+  return d.getTime() >= cutoff.getTime()
+}
+
+function todayKeyLocal(d = new Date()): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
 }
 
 export function normalizeSyncWords(raw: RawSyncWord[], date: string): WordRecord[] {
@@ -81,7 +134,7 @@ export function normalizeSyncWords(raw: RawSyncWord[], date: string): WordRecord
       const meaning = item.meaning || item.trans || ''
       const type = normalizeType(item.type ?? item.status ?? item.tag)
       const mastery = normalizeMastery(item.mastery || item.status)
-      const frequency = item.frequency ?? 1
+      const frequency = Math.min(item.frequency ?? 1, 9999)
       const weak = item.weak === true || mastery === 'weak' || /weak|薄弱|强化|STICKING/i.test(item.status || item.tag || '')
       return {
         id: `sync-${date}-${word.toLowerCase()}-${index}`,
@@ -97,20 +150,68 @@ export function normalizeSyncWords(raw: RawSyncWord[], date: string): WordRecord
       }
     })
     .filter((w) => w.word)
+    .slice(0, MAX_WORDS)
 }
 
 function resolveOpenBase(baseUrl?: string): string {
   const raw = (baseUrl || '').trim()
   if (!raw) return MAIMEMO_OPEN_BASE
   const cleaned = raw.replace(/\/$/, '')
-  // 允许用户直接填完整 open 前缀，或只填域名
   if (/\/open$/i.test(cleaned)) return cleaned
   if (/open\.maimemo\.com$/i.test(cleaned)) return `${cleaned}/open`
-  if (/^https?:\/\//i.test(cleaned)) {
-    // 若填了 open.maimemo.com/open/api/... 则退回 /open
-    return cleaned.replace(/\/api\/.*$/i, '')
-  }
+  if (/^https?:\/\//i.test(cleaned)) return cleaned.replace(/\/api\/.*$/i, '')
   return MAIMEMO_OPEN_BASE
+}
+
+function parseMaybeJson(text: string): unknown {
+  if (!text) return {}
+  try {
+    return JSON.parse(text)
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * 统一 HTTP：Android/iOS 走 CapacitorHttp（绕过 WebView CORS，避免 fail to fetch），
+ * 浏览器开发环境走 fetch + AbortController。
+ */
+async function requestJson<T>(
+  url: string,
+  init: { method?: string; headers?: Record<string, string>; body?: unknown; timeoutMs?: number },
+): Promise<{ status: number; data: T }> {
+  const method = init.method || 'GET'
+  const headers = init.headers || {}
+  const timeoutMs = init.timeoutMs ?? FETCH_TIMEOUT_MS
+
+  if (Capacitor.isNativePlatform()) {
+    const res = await CapacitorHttp.request({
+      url,
+      method: method as 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH',
+      headers,
+      data: init.body as never,
+      connectTimeout: timeoutMs,
+      readTimeout: timeoutMs,
+    })
+    const raw = res.data
+    const data = (typeof raw === 'string' ? parseMaybeJson(raw) : raw) as T
+    return { status: res.status, data }
+  }
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const res = await fetch(url, {
+      method,
+      headers,
+      body: init.body === undefined ? undefined : JSON.stringify(init.body),
+      signal: controller.signal,
+    })
+    const text = await res.text()
+    return { status: res.status, data: parseMaybeJson(text) as T }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 async function maimemoFetch<T>(
@@ -121,59 +222,53 @@ async function maimemoFetch<T>(
 ): Promise<T> {
   const base = resolveOpenBase(baseUrl)
   const url = `${base}${path.startsWith('/') ? path : `/${path}`}`
-  const res = await fetch(url, {
+  const { status, data } = await requestJson<T>(url, {
     method: init?.method || 'GET',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
       Authorization: `Bearer ${accessToken}`,
     },
-    body: init?.body === undefined ? undefined : JSON.stringify(init.body),
+    body: init?.body,
   })
-  const text = await res.text()
-  if (!res.ok) {
-    let detail = text.slice(0, 200)
-    try {
-      const j = JSON.parse(text) as { message?: string; error?: string; msg?: string }
-      detail = j.message || j.error || j.msg || detail
-    } catch {
-      /* keep text */
-    }
-    throw new Error(`墨墨 API ${res.status}: ${detail}`)
+  if (status < 200 || status >= 300) {
+    const obj = data as { errors?: { code?: string; msg?: string }[]; message?: string; success?: boolean }
+    const detail =
+      obj?.errors?.map((e) => `${e.code || ''}:${e.msg || ''}`).join('; ') ||
+      obj?.message ||
+      `HTTP ${status}`
+    throw new Error(`墨墨 API ${status}: ${detail}`)
   }
-  return (text ? JSON.parse(text) : {}) as T
+  return data
 }
 
-/**
- * 按官方文档同步今日学习数据。
- * 文档：https://open.maimemo.com/document#/
- * - POST /api/v1/memo/study/get_today_items
- * - POST /api/v1/memo/study/get_study_progress
- * - POST /api/v1/memo/study/query_study_records
- * - POST /api/v1/memo/vocabulary/query （可选补全）
- * Base：https://open.maimemo.com/open
- * Auth：Authorization: Bearer <用户 Token>
- */
 export async function fetchMaimemoStudyBundle(params: {
   baseUrl: string
   accessToken: string
   limit?: number
+  days?: number
+  recordLimit?: number
 }): Promise<{
   todayItems: MaimemoStudyTodayItem[]
   progress: MaimemoStudyProgress | null
   records: MaimemoStudyRecord[]
+  weekRecords: MaimemoStudyRecord[]
   rawWords: RawSyncWord[]
+  dayBuckets: MaimemoDayBucket[]
+  historyByWord: Record<string, HistItem[]>
 }> {
   if (!params.accessToken) {
     throw new Error('尚未填写墨墨用户 Token，请先在设置中粘贴')
   }
+  const days = Math.max(1, Math.min(params.days ?? 7, 30))
+  const now = new Date()
+  const today = todayKeyLocal(now)
 
-  // 公测接口：需要 App 开启自动同步；当日未打开 App 可能为空
   const todayRes = await maimemoFetch<{ today_items?: MaimemoStudyTodayItem[] }>(
     params.baseUrl,
     '/api/v1/memo/study/get_today_items',
     params.accessToken,
-    { method: 'POST', body: { limit: params.limit ?? 200 } },
+    { method: 'POST', body: { limit: Math.min(params.limit ?? 200, 1000) } },
   )
 
   let progress: MaimemoStudyProgress | null = null
@@ -189,55 +284,190 @@ export async function fetchMaimemoStudyBundle(params: {
     progress = null
   }
 
-  const todayItems = todayRes.today_items || []
-  const spellings = todayItems.map((t) => t.voc_spelling).filter(Boolean)
+  const todayItems = (todayRes.today_items || []).slice(0, 500)
+  const todaySpellings = new Set(
+    todayItems.map((t) => (t.voc_spelling || '').toLowerCase()).filter(Boolean),
+  )
 
   let records: MaimemoStudyRecord[] = []
-  if (spellings.length) {
+  try {
+    const r = await maimemoFetch<{ records?: MaimemoStudyRecord[] }>(
+      params.baseUrl,
+      '/api/v1/memo/study/query_study_records',
+      params.accessToken,
+      { method: 'POST', body: { limit: Math.min(params.recordLimit ?? MAX_RECORDS, MAX_RECORDS) } },
+    )
+    records = (r.records || []).slice(0, MAX_RECORDS)
+  } catch {
+    records = []
+  }
+
+  if (todaySpellings.size) {
     try {
-      const r = await maimemoFetch<{ records?: MaimemoStudyRecord[] }>(
+      const spellings = Array.from(todaySpellings).slice(0, 200)
+      const r2 = await maimemoFetch<{ records?: MaimemoStudyRecord[] }>(
         params.baseUrl,
         '/api/v1/memo/study/query_study_records',
         params.accessToken,
-        { method: 'POST', body: { spellings: spellings.slice(0, 200), limit: 200 } },
+        { method: 'POST', body: { spellings, limit: 200 } },
       )
-      records = r.records || []
+      const seen = new Set(records.map((x) => x.voc_id || x.voc_spelling))
+      for (const e of r2.records || []) {
+        const k = e.voc_id || e.voc_spelling
+        if (!seen.has(k)) {
+          records.push(e)
+          seen.add(k)
+        }
+      }
     } catch {
-      records = []
+      /* ignore */
     }
   }
 
-  const recMap = new Map(records.map((r) => [r.voc_spelling?.toLowerCase(), r]))
+  const weekRecords = records.filter(
+    (r) =>
+      withinLastDays(r.last_study_date, days, now) ||
+      withinLastDays(r.first_study_date, days, now) ||
+      todaySpellings.has((r.voc_spelling || '').toLowerCase()),
+  )
 
-  const rawWords: RawSyncWord[] = todayItems.map((item) => {
-    const rec = recMap.get(item.voc_spelling?.toLowerCase())
-    const mastery = item.first_response
-      ? responseToMastery(item.first_response)
+  const recMap = new Map<string, MaimemoStudyRecord>()
+  for (const r of records) {
+    if (!r.voc_spelling) continue
+    recMap.set(r.voc_spelling.toLowerCase(), r)
+  }
+
+  const historyByWord: Record<string, HistItem[]> = {}
+  const dayStatsMap = new Map<string, { newSet: Set<string>; reviewSet: Set<string>; weakSet: Set<string> }>()
+
+  function ensureDay(date: string) {
+    if (!dayStatsMap.has(date)) dayStatsMap.set(date, { newSet: new Set(), reviewSet: new Set(), weakSet: new Set() })
+    return dayStatsMap.get(date)!
+  }
+
+  function pushHist(word: string, date: string | null, type: WordType, result: HistItem['result']) {
+    if (!date || !word) return
+    const key = word.toLowerCase()
+    if (!historyByWord[key]) historyByWord[key] = []
+    const hist = historyByWord[key]
+    if (hist.length >= MAX_HISTORY_PER_WORD) return
+    if (hist.some((h) => h.date === date && h.type === type)) return
+    hist.push({ date, type, result })
+    const bucket = ensureDay(date)
+    if (type === 'new') bucket.newSet.add(key)
+    else bucket.reviewSet.add(key)
+    if (result !== 'remembered') bucket.weakSet.add(key)
+  }
+
+  for (const rec of weekRecords) {
+    const word = rec.voc_spelling
+    if (!word) continue
+    const mastery = responseToMastery(rec.last_response)
+    const last = localDateKey(rec.last_study_date)
+    const first = localDateKey(rec.first_study_date)
+    if (last) pushHist(word, last, 'review', responseToResult(mastery))
+    if (first && first !== last) pushHist(word, first, 'new', 'partial')
+  }
+
+  for (const item of todayItems) {
+    const word = item.voc_spelling
+    if (!word) continue
+    const rec = recMap.get(word.toLowerCase())
+    const resp = item.first_response
+    const hasResp = Boolean(resp) && !String(typeof resp === 'string' ? resp : resp?.response || '').includes('UNSPECIFIED')
+    const mastery = hasResp
+      ? responseToMastery(resp)
       : rec?.last_response
         ? responseToMastery(rec.last_response)
         : item.is_finished
           ? 'good'
           : 'warn'
-    const tags = rec?.tags
-    const weak = item.is_finished === false || tagsToWeak(tags) || mastery === 'weak'
-    return {
-      word: item.voc_spelling,
+    pushHist(word, today, item.is_new ? 'new' : 'review', responseToResult(mastery))
+  }
+
+  const rawWordMap = new Map<string, RawSyncWord>()
+
+  function upsertRaw(word: string, patch: Partial<RawSyncWord>) {
+    if (!word || rawWordMap.size >= MAX_WORDS) return
+    const key = word.toLowerCase()
+    const prev = rawWordMap.get(key) || { word }
+    rawWordMap.set(key, { ...prev, ...patch, word })
+  }
+
+  for (const rec of weekRecords) {
+    const word = rec.voc_spelling
+    if (!word) continue
+    const tags = tagsList(rec.tags)
+    const mastery = responseToMastery(rec.last_response)
+    const weak = tagsToWeak(rec.tags) || mastery === 'weak'
+    const hist = historyByWord[word.toLowerCase()] || []
+    upsertRaw(word, {
+      type: 'review',
+      mastery,
+      frequency: Math.min(rec.study_count ?? hist.length ?? 1, 9999),
+      weak,
+      focus: weak || (rec.study_count ?? 0) >= 3,
+      tag: tags.join(','),
+      studyCount: rec.study_count,
+    })
+  }
+
+  for (const item of todayItems) {
+    const word = item.voc_spelling
+    if (!word) continue
+    const rec = recMap.get(word.toLowerCase())
+    const tags = tagsList(rec?.tags)
+    const resp = item.first_response
+    const hasResp = Boolean(resp) && !String(typeof resp === 'string' ? resp : resp?.response || '').includes('UNSPECIFIED')
+    const mastery = hasResp
+      ? responseToMastery(resp)
+      : rec?.last_response
+        ? responseToMastery(rec.last_response)
+        : item.is_finished
+          ? 'good'
+          : 'warn'
+    const weak = item.is_finished === false || tagsToWeak(rec?.tags) || mastery === 'weak'
+    const hist = historyByWord[word.toLowerCase()] || []
+    upsertRaw(word, {
       type: item.is_new ? 'new' : 'review',
       mastery,
-      frequency: rec?.study_count ?? 1,
+      frequency: Math.min(Math.max(rec?.study_count ?? 0, hist.length, 1), 9999),
       weak,
       focus: weak || item.is_new === false,
       status: item.is_finished ? 'finished' : 'unfinished',
-      tag: Array.isArray(tags) ? tags.join(',') : tags,
+      tag: tags.join(','),
       finished: item.is_finished,
       studyCount: rec?.study_count,
-    }
-  })
+    })
+  }
 
-  return { todayItems, progress, records, rawWords }
+  const dayBuckets: MaimemoDayBucket[] = Array.from(dayStatsMap.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .slice(-31)
+    .map(([date, b]) => {
+      const totalCount = b.newSet.size + b.reviewSet.size
+      const weak = b.weakSet.size
+      return {
+        date,
+        newCount: b.newSet.size,
+        reviewCount: b.reviewSet.size,
+        totalCount,
+        focusCount: weak,
+        score: totalCount ? Math.min(100, Math.round(((totalCount - weak) / totalCount) * 70 + 30)) : 0,
+      }
+    })
+
+  return {
+    todayItems,
+    progress,
+    records,
+    weekRecords,
+    rawWords: Array.from(rawWordMap.values()),
+    dayBuckets,
+    historyByWord,
+  }
 }
 
-/** 兼容旧调用：拉取今日单词 */
 export async function fetchMaimemoWords(params: {
   baseUrl: string
   accessToken: string
@@ -249,13 +479,14 @@ export async function fetchMaimemoWords(params: {
   })
   if (bundle.rawWords.length) return bundle.rawWords
   throw new Error(
-    '今日学习单词为空。请确认：1) Token 来自墨墨 App「开放 API」或 open.maimemo.com；2) 今日已打开墨墨背单词并完成初始化；3) App 已开启自动同步。公测接口可能随时调整。',
+    '学习单词为空。请确认 Token 有效；近一周是否在墨墨中有学习记录；App 已开启自动同步。公测接口可能随时调整。',
   )
 }
 
 export function parseImportPayload(text: string): RawSyncWord[] {
   const trimmed = text.trim()
   if (!trimmed) throw Error('请粘贴 JSON 数据')
+  if (trimmed.length > 2_000_000) throw Error('导入数据过大')
   const json = JSON.parse(trimmed) as unknown
   if (!Array.isArray(json) && typeof json === 'object' && json) {
     const obj = json as Record<string, unknown>
@@ -263,7 +494,7 @@ export function parseImportPayload(text: string): RawSyncWord[] {
     for (const key of keys) {
       const value = obj[key]
       if (Array.isArray(value)) {
-        return (value as unknown[]).map((row) => {
+        return (value as unknown[]).slice(0, MAX_WORDS).map((row) => {
           if (typeof row === 'string') return { word: row, type: 'new' as const, mastery: 'warn' as const }
           const r = row as Record<string, unknown>
           return {
@@ -271,14 +502,19 @@ export function parseImportPayload(text: string): RawSyncWord[] {
             meaning: String(r.meaning || r.trans || r.translation || ''),
             type: (r.type || r.status || (r.is_new ? 'new' : 'review')) as string,
             mastery: (r.mastery || r.level) as string | undefined,
-            frequency: typeof r.frequency === 'number' ? r.frequency : typeof r.study_count === 'number' ? r.study_count : undefined,
+            frequency:
+              typeof r.frequency === 'number'
+                ? r.frequency
+                : typeof r.study_count === 'number'
+                  ? r.study_count
+                  : undefined,
           }
         })
       }
     }
   }
   if (Array.isArray(json)) {
-    return json.map((row) => {
+    return json.slice(0, MAX_WORDS).map((row) => {
       if (typeof row === 'string') return { word: row, type: 'new' as const, mastery: 'warn' as const }
       const r = row as Record<string, unknown>
       return {
@@ -296,7 +532,7 @@ export async function chatComplete(settings: MimoSettings, messages: { role: str
   const relay = aiRelayUrl()
   if (!relay && !settings.apiKey) {
     throw new Error(
-      'MiMo 未就绪：请部署 Cloudflare Worker 并配置 VITE_AI_RELAY_URL，或在设置中于本机保存 API Key（Key 不会出现在公网前端）。',
+      'MiMo 未就绪：请在设置中于本机保存 API Key，或配置 Worker 中继。（Key 不会出现在公网前端/APK）',
     )
   }
   const base = settings.baseUrl.replace(/\/$/, '')
@@ -307,7 +543,6 @@ export async function chatComplete(settings: MimoSettings, messages: { role: str
     Accept: 'application/json',
   }
   if (relay) {
-    // Worker 中继：Key 只在 Cloudflare Secret，前端不携带
     headers['X-Ciji-Client'] = 'web'
   } else {
     headers.Authorization = `Bearer ${settings.apiKey}`
@@ -315,21 +550,18 @@ export async function chatComplete(settings: MimoSettings, messages: { role: str
 
   const payload = {
     model: settings.model || 'mimo-v2.5',
-    messages,
+    messages: messages.slice(-20),
     temperature: 0.7,
   }
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(payload),
-  })
-  const text = await res.text()
-  if (!res.ok) {
-    throw new Error(`MiMo 请求失败 HTTP ${res.status}: ${text.slice(0, 200)}`)
-  }
-  const data = JSON.parse(text) as {
+  const { status, data } = await requestJson<{
     choices?: { message?: { content?: string } }[]
+    error?: { message?: string }
+  }>(url, { method: 'POST', headers, body: payload, timeoutMs: 60000 })
+
+  if (status < 200 || status >= 300) {
+    const detail = data?.error?.message || `HTTP ${status}`
+    throw new Error(`MiMo 请求失败: ${detail}`)
   }
   const content = data?.choices?.[0]?.message?.content
   if (!content) throw new Error('MiMo 返回内容为空')
@@ -337,7 +569,7 @@ export async function chatComplete(settings: MimoSettings, messages: { role: str
 }
 
 export async function testMimoConnection(settings: MimoSettings): Promise<{ ok: boolean; message: string }> {
-  if (!settings.apiKey) return { ok: false, message: '尚未填写 API Key' }
+  if (!settings.apiKey && !aiRelayUrl()) return { ok: false, message: '尚未填写 API Key' }
   try {
     const content = await chatComplete(settings, [{ role: 'user', content: 'ping，回复 pong 即可' }])
     return { ok: true, message: `连接成功：${content.slice(0, 40)}` }
@@ -346,22 +578,26 @@ export async function testMimoConnection(settings: MimoSettings): Promise<{ ok: 
   }
 }
 
-export async function testMaimemoToken(params: { baseUrl: string; accessToken: string }): Promise<{
+export async function testMaimemoToken(params: {
+  baseUrl: string
+  accessToken: string
+  days?: number
+}): Promise<{
   ok: boolean
   message: string
   todayCount?: number
+  weekCount?: number
   progress?: MaimemoStudyProgress | null
 }> {
   if (!params.accessToken) return { ok: false, message: '请先粘贴用户 Token' }
   try {
-    const bundle = await fetchMaimemoStudyBundle(params)
+    const bundle = await fetchMaimemoStudyBundle({ ...params, days: params.days ?? 7 })
     const p = bundle.progress
     return {
       ok: true,
-      message: p
-        ? `连接成功。今日进度 ${p.finished ?? 0}/${p.total ?? 0}，学习词 ${bundle.todayItems.length} 个`
-        : `连接成功。今日学习词 ${bundle.todayItems.length} 个`,
+      message: `连接成功。今日 ${bundle.todayItems.length} 词，近一周学习词 ${bundle.weekRecords.length}，进度 ${p?.finished ?? 0}/${p?.total ?? '—'}`,
       todayCount: bundle.todayItems.length,
+      weekCount: bundle.weekRecords.length,
       progress: p,
     }
   } catch (e) {

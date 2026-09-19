@@ -264,21 +264,24 @@ export default function App() {
       const bundle = await fetchMaimemoStudyBundle({
         baseUrl: settings.maimemo.baseUrl,
         accessToken: data.secrets.maimemoAccessToken,
+        days: 7,
       })
-      if (!bundle.rawWords.length) {
+      if (!bundle.rawWords.length && !bundle.weekRecords.length) {
         throw new Error(
-          '今日学习单词为空。请确认今日已打开墨墨并学习/初始化，且 App 开启了自动同步。公测接口：POST .../memo/study/get_today_items',
+          '同步结果为空：请确认 Token 有效，且近一周在墨墨中有学习记录（App 需开启自动同步）。',
         )
       }
-      const incoming = normalizeSyncWords(bundle.rawWords, todayKey())
-      // 用官方进度覆盖完成度（若有）
-      let snapOverride: { finished?: number; total?: number } | null = null
-      if (bundle.progress) snapOverride = bundle.progress
+      const today = todayKey()
+      const incoming = normalizeSyncWords(bundle.rawWords, today)
 
       const map = new Map(data.words.map((w) => [w.word.toLowerCase(), w]))
       for (const w of incoming) {
         const key = w.word.toLowerCase()
+        const extra = (bundle.historyByWord[key] || []).slice(0, 20)
         const prev = map.get(key)
+        const mergedHist = [...extra, ...w.history, ...(prev?.history || [])].filter(
+          (h, i, arr) => arr.findIndex((x) => x.date === h.date && x.type === h.type) === i,
+        ).slice(0, 30)
         map.set(
           key,
           prev
@@ -286,29 +289,47 @@ export default function App() {
                 ...prev,
                 ...w,
                 id: prev.id,
-                history: [...w.history, ...prev.history].slice(0, 20),
-                ai: w.ai || prev.ai,
+                history: mergedHist,
+                ai: prev.ai || w.ai,
               }
-            : w,
+            : { ...w, history: mergedHist },
         )
       }
-      const words = Array.from(map.values())
+      const words = Array.from(map.values()).slice(0, 3000)
       await upsertWords(words)
+
+      // 近一周每日快照 + 今日进度覆盖
+      for (const day of bundle.dayBuckets) {
+        await putSnapshot({
+          id: day.date,
+          date: day.date,
+          newCount: day.newCount,
+          reviewCount: day.reviewCount,
+          totalCount: day.totalCount,
+          focusCount: day.focusCount,
+          score: day.score,
+        })
+      }
       const localSnap = getTodayStats(words, settings.targetDaily)
       const todayNew = incoming.filter((w) => w.type === 'new').length
       const todayReview = incoming.filter((w) => w.type === 'review').length
-      const snap = snapOverride
-        ? {
-            ...localSnap,
-            newCount: todayNew,
-            reviewCount: todayReview,
-            totalCount: snapOverride.total ?? incoming.length,
-            score: snapOverride.total
-              ? Math.min(100, Math.round(((snapOverride.finished ?? 0) / snapOverride.total) * 100))
-              : localSnap.score,
-          }
-        : localSnap
-      await putSnapshot({ ...snap, id: snap.date })
+      const todayFromWeek = bundle.dayBuckets.find((d) => d.date === today)
+      const snap =
+        bundle.progress && bundle.progress.total
+          ? {
+              ...localSnap,
+              date: today,
+              newCount: todayNew || todayFromWeek?.newCount || 0,
+              reviewCount: todayReview || todayFromWeek?.reviewCount || 0,
+              totalCount: bundle.progress.total,
+              focusCount: todayFromWeek?.focusCount || localSnap.focusCount,
+              score: Math.min(100, Math.round(((bundle.progress.finished || 0) / bundle.progress.total) * 100)),
+            }
+          : todayFromWeek
+            ? { ...todayFromWeek }
+            : localSnap
+      await putSnapshot({ ...snap, id: snap.date, date: snap.date })
+
       const nextSettings: AppSettings = {
         ...settings,
         dataSource: 'maimemo',
@@ -320,7 +341,7 @@ export default function App() {
       const localReview = buildLocalReview({
         settings: nextSettings,
         words,
-        dayStats: [],
+        dayStats: bundle.dayBuckets,
         stories: data.stories,
         reviews: data.reviews,
         homeSummary: home,
@@ -328,7 +349,9 @@ export default function App() {
       })
       await putReview(localReview)
       await reload()
-      setToast(`同步完成，更新 ${incoming.length} 个词`)
+      setToast(
+        `同步完成：今日 ${incoming.length} 词，近一周 ${bundle.weekRecords.length} 词，趋势 ${bundle.dayBuckets.length} 天`,
+      )
     })
   }
 

@@ -1,18 +1,18 @@
 {
-  "versionCode": 2,
-  "versionName": "1.1.0",
+  "versionCode": 3,
+  "versionName": "1.2.0",
   "minVersionCode": 1,
   "force": false,
-  "releasedAt": "2026-09-19T07:30:00.000Z",
+  "releasedAt": "2026-09-19T08:20:00.000Z",
   "changelog": [
-    "墨墨开放 API 用户 Token 真实同步",
-    "MiMo 密钥仅存本机，不打包进 APK",
-    "App 内检查更新与覆盖安装",
-    "GitHub Actions 自动签名发布"
+    "墨墨同步扩展为今日 + 近 7 天学习数据",
+    "Android 原生 HTTP 调用墨墨，修复 WebView fail to fetch",
+    "请求超时/Abort、记录与历史长度上限，降低内存泄漏风险",
+    "Token/API Key 不入包；导入数据体积校验"
   ],
   "github": {
     "owner": "qian-le",
     "repo": "ciji"
   },
-  "apkUrl": "https://github.com/qian-le/ciji/releases/download/v1.1.0/ciji-v1.1.0.apk"
+  "apkUrl": "https://github.com/qian-le/ciji/releases/download/v1.2.0/ciji-v1.2.0.apk"
 }
